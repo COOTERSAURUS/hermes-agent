@@ -284,7 +284,7 @@ def _host_lock_is_free(role: str) -> Optional[bool]:
 
 
 def _current_boot_epoch() -> str:
-    """Identity of this boot. Empty when /proc is unreadable — then the check is a no-op."""
+    """Identity of this boot. Empty when /proc is unreadable — a recorded epoch is then unprovable."""
     try:
         from gateway.drain_control import current_instantiation_epoch
 
@@ -301,16 +301,21 @@ def _record_incarnation_matches(record: HostRecord) -> Optional[bool]:
     ticks and is immune to wall-clock shifts that move psutil.create_time(). Those ticks are
     NOT unique across reboots — they reset, and an early-boot PID reused within the drift
     tolerance looks like the dead owner. A published boot epoch that differs from this boot's is a
-    mismatch. A gateway record with no epoch (published before ``bootEpoch`` existed, or on any
-    platform without /proc, where the epoch is always empty) whose create_time predates this boot
-    is a mismatch only while nobody holds the host lock. Do not infer identity from argv. A record with neither create_time nor start_time proves nothing about
-    its pid, so it never vouches for one. Legacy records without a start fingerprint keep the
-    create-time check.
+    mismatch; one that cannot be compared (this boot's epoch is unreadable) is unprovable, ``None``.
+
+    A gateway record with no epoch (published before ``bootEpoch`` existed, or on any platform
+    without /proc, where the epoch is always empty) whose create_time predates this boot is a
+    mismatch only while nobody holds the host lock. A record with neither create_time nor
+    start_time proves nothing about its pid, so it never vouches for one. Legacy records without
+    a start fingerprint keep the create-time check. Do not infer identity from argv.
     """
     recorded_epoch = record.boot_epoch
     epoch = _current_boot_epoch()
-    if recorded_epoch and epoch and recorded_epoch != epoch:
-        return False
+    if recorded_epoch:
+        if not epoch:
+            return None  # boots can't be compared; matching ticks alone prove nothing
+        if recorded_epoch != epoch:
+            return False
     if record.start_time is None and record.create_time is None:
         return False
     if record.start_time is None:

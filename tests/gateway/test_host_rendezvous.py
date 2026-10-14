@@ -225,6 +225,16 @@ def test_boot_epoch_mismatch_rejects_a_tick_match(host_dir):
     assert hr.record_is_stale(foreign) is True
 
 
+@pytest.mark.platforms("linux")
+def test_recorded_epoch_with_unreadable_current_epoch_is_unprovable(host_dir, monkeypatch):
+    record = hr.publish_record(hr.ROLE_GATEWAY, profiles=("default",), home=str(host_dir))
+    assert record is not None and record.boot_epoch
+    monkeypatch.setattr(hr, "_current_boot_epoch", lambda: "")
+    assert hr._record_incarnation_matches(record) is None
+    assert hr.liveness_is_proven(record) is False
+    assert hr.record_is_stale(record) is False
+
+
 @pytest.mark.platforms("posix")
 def test_empty_boot_epoch_does_not_stale_a_live_owner(host_dir):
     record = hr.publish_record(hr.ROLE_GATEWAY, profiles=("default",), home=str(host_dir))
