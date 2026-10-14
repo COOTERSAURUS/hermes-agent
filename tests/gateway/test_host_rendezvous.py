@@ -139,21 +139,24 @@ def test_live_host_record_survives_wall_clock_create_time_drift(host_dir, monkey
 def test_reused_early_pid_after_reboot_is_not_the_gateway():
     """Boot-relative start ticks reset on reboot and collide within the 2s drift tolerance.
 
-    A legacy record (no bootEpoch) with a reboot-scale createTime gap must not keep a
-    supervised unit in the transient-refuse loop. The same tick match with a WSL-scale
-    gap (#117505) stays live.
+    A legacy record (no bootEpoch) whose createTime predates this boot cannot describe a live
+    process. A record dated inside this boot stays live however far the live create_time
+    reading has since drifted from it (#117505), and a record with no incarnation proof at
+    all never vouches for the pid.
     """
+    import psutil
+
     from gateway.status import get_process_start_time
 
     child = subprocess.Popen(["sleep", "30"])
     try:
         start = get_process_start_time(child.pid)
-        live_create = hr.process_create_time(child.pid)
-        assert start is not None and live_create is not None
+        assert start is not None
+        boot = psutil.boot_time()
         record = hr.HostRecord(
             role=hr.ROLE_GATEWAY,
             pid=child.pid,
-            create_time=float(live_create) - 3600.0,
+            create_time=boot - 3600.0,
             start_time=int(start) + 10,
             host="",
             port=None,
@@ -164,9 +167,12 @@ def test_reused_early_pid_after_reboot_is_not_the_gateway():
         )
         assert hr.liveness_is_proven(record) is False
         assert hr.record_is_stale(record) is True
-        drifted = dataclasses.replace(record, create_time=float(live_create) - 5.0)
+        drifted = dataclasses.replace(record, create_time=boot + 1.0)
         assert hr.liveness_is_proven(drifted) is True
         assert hr.record_is_stale(drifted) is False
+        unprovable = dataclasses.replace(record, create_time=None, start_time=None)
+        assert hr.liveness_is_proven(unprovable) is False
+        assert hr.record_is_stale(unprovable) is True
     finally:
         child.kill()
         child.wait(timeout=10)

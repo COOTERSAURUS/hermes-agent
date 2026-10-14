@@ -244,11 +244,22 @@ def _pid_incarnation_matches(pid: int, create_time: Optional[float]) -> Optional
     return _pid_alive_matches(pid, create_time)
 
 
-# Wall-clock create_time drifts by seconds on WSL (#117505). A reboot moves it by minutes
-# and resets boot-relative start ticks, so a tick match within START_TIME_DRIFT_TOLERANCE
-# after reboot is a recycled early PID, not the owner. 120s is far outside that drift and
-# inside every reboot gap that has actually wedged a supervised gateway.
-_LEGACY_CREATE_TIME_REBOOT_GAP_S = 120.0
+# A record published before ``bootEpoch`` existed cannot name its boot, but its ``create_time``
+# still says when the owner started. An owner started before this boot began cannot be alive in
+# it, so a tick match against such a record is a recycled early PID. Anchoring on boot time (not
+# on a live ``create_time`` reading) keeps #117505 intact: a wall-clock resync moves the live
+# reading of a running owner, never the point in time the record says it started.
+_LEGACY_BOOT_SLACK_S = 120.0
+
+
+def _boot_time() -> Optional[float]:
+    try:
+        import psutil
+
+        return float(psutil.boot_time())
+    except Exception:
+        logger.debug("boot time unreadable; legacy record age check skipped", exc_info=True)
+        return None
 
 
 def _current_boot_epoch() -> str:
@@ -268,14 +279,18 @@ def _record_incarnation_matches(record: HostRecord) -> Optional[bool]:
     New records prefer the canonical start fingerprint: on Linux/WSL it comes from /proc start
     ticks and is immune to wall-clock shifts that move psutil.create_time(). Those ticks are
     NOT unique across reboots — they reset, and an early-boot PID reused within the drift
-    tolerance looks like the dead owner. A published boot epoch, or (for legacy records with
-    no epoch) a create_time gap past reboot scale, is a mismatch. Empty epoch is a no-op so
-    macOS and pre-upgrade records are not false-staled. Do not infer identity from argv.
-    Legacy records without a start fingerprint keep the create-time check.
+    tolerance looks like the dead owner. A published boot epoch that differs from this boot's, or
+    (for legacy records with no epoch) a create_time from before this boot began, is a mismatch.
+    Empty epoch is a no-op so macOS and pre-upgrade records are not false-staled. Do not infer
+    identity from argv. A record with neither create_time nor start_time proves nothing about
+    its pid, so it never vouches for one. Legacy records without a start fingerprint keep the
+    create-time check.
     """
     recorded_epoch = getattr(record, "boot_epoch", "") or ""
     epoch = _current_boot_epoch()
     if recorded_epoch and epoch and recorded_epoch != epoch:
+        return False
+    if record.start_time is None and record.create_time is None:
         return False
     if record.start_time is None:
         matched = _pid_incarnation_matches(record.pid, record.create_time)
@@ -289,17 +304,9 @@ def _record_incarnation_matches(record: HostRecord) -> Optional[bool]:
         matched = None if current is None else start_time_fingerprints_match(record.start_time, current)
     if matched is not True:
         return matched
-    if (
-        record.role == ROLE_GATEWAY
-        and not recorded_epoch
-        and record.start_time is not None
-        and record.create_time is not None
-    ):
-        live_create = process_create_time(record.pid)
-        if (
-            live_create is not None
-            and abs(float(live_create) - float(record.create_time)) > _LEGACY_CREATE_TIME_REBOOT_GAP_S
-        ):
+    if record.role == ROLE_GATEWAY and not recorded_epoch and record.create_time is not None:
+        boot = _boot_time()
+        if boot is not None and float(record.create_time) < boot - _LEGACY_BOOT_SLACK_S:
             return False
     return True
 
