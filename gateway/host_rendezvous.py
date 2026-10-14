@@ -244,11 +244,11 @@ def _pid_incarnation_matches(pid: int, create_time: Optional[float]) -> Optional
     return _pid_alive_matches(pid, create_time)
 
 
-# A record published before ``bootEpoch`` existed cannot name its boot, but its ``create_time``
-# still says when the owner started. An owner started before this boot began cannot be alive in
-# it, so a tick match against such a record is a recycled early PID. Anchoring on boot time (not
-# on a live ``create_time`` reading) keeps #117505 intact: a wall-clock resync moves the live
-# reading of a running owner, never the point in time the record says it started.
+# A record published before ``bootEpoch`` existed cannot name its boot. Its ``createTime`` older
+# than this boot's start (``psutil.boot_time()``, minus this slack) means EITHER a reboot (the
+# owner is gone and its PID was recycled) OR a wall-clock step since the owner started (boot time
+# is wall clock minus uptime, so a forward step moves it past a running owner's saved start;
+# #117505). Clocks cannot tell those apart, so the host lock decides: a live gateway holds it.
 _LEGACY_BOOT_SLACK_S = 120.0
 
 
@@ -260,6 +260,33 @@ def _boot_time() -> Optional[float]:
     except Exception:
         logger.debug("boot time unreadable; legacy record age check skipped", exc_info=True)
         return None
+
+
+def _host_lock_is_free(role: str) -> Optional[bool]:
+    """True when no process holds the host lock for ``role``; ``None`` when it cannot be probed.
+
+    The probe takes the lock for an instant, so a gateway claiming it in that instant gets
+    HELD_BY_OTHER and its supervisor retries. Callers only reach this for a legacy record that
+    is already suspect, never on the normal attach path.
+    """
+    if owns_host_lock(role):
+        return False
+    from gateway.status import _release_file_lock, _try_acquire_file_lock
+
+    try:
+        ensure_host_state_dir()
+        handle = open(lock_path(role), "a+", encoding="utf-8")  # windows-footgun: ok — flock handle, never read
+    except OSError:
+        logger.debug("host %s lock could not be probed", role, exc_info=True)
+        return None
+    try:
+        if not _try_acquire_file_lock(handle):
+            return False
+        _release_file_lock(handle)
+        return True
+    finally:
+        with contextlib.suppress(OSError):
+            handle.close()
 
 
 def _current_boot_epoch() -> str:
@@ -280,8 +307,8 @@ def _record_incarnation_matches(record: HostRecord) -> Optional[bool]:
     ticks and is immune to wall-clock shifts that move psutil.create_time(). Those ticks are
     NOT unique across reboots — they reset, and an early-boot PID reused within the drift
     tolerance looks like the dead owner. A published boot epoch that differs from this boot's, or
-    (for legacy records with no epoch) a create_time from before this boot began, is a mismatch.
-    Empty epoch is a no-op so macOS and pre-upgrade records are not false-staled. Do not infer
+    (for legacy records with no epoch) a create_time from before this boot began while nobody holds
+    the host lock, is a mismatch. Empty epoch is a no-op so macOS and pre-upgrade records are not false-staled. Do not infer
     identity from argv. A record with neither create_time nor start_time proves nothing about
     its pid, so it never vouches for one. Legacy records without a start fingerprint keep the
     create-time check.
@@ -307,7 +334,11 @@ def _record_incarnation_matches(record: HostRecord) -> Optional[bool]:
     if record.role == ROLE_GATEWAY and not recorded_epoch and record.create_time is not None:
         boot = _boot_time()
         if boot is not None and float(record.create_time) < boot - _LEGACY_BOOT_SLACK_S:
-            return False
+            lock_free = _host_lock_is_free(record.role)
+            if lock_free is None:
+                return None
+            if lock_free:
+                return False
     return True
 
 
