@@ -140,9 +140,9 @@ def test_reused_early_pid_after_reboot_is_not_the_gateway(host_dir):
     """Boot-relative start ticks reset on reboot and collide within the 2s drift tolerance.
 
     A legacy record (no bootEpoch) whose createTime predates this boot, with nobody holding the
-    host lock, cannot describe a live process. A record dated inside this boot stays live however far the live create_time
-    reading has since drifted from it (#117505), and a record with no incarnation proof at
-    all never vouches for the pid.
+    host lock, cannot describe a live process, and judging it creates no lock file. A record dated
+    inside this boot stays live however far the live create_time reading has since drifted from it
+    (#117505), and a record with no incarnation proof at all never vouches for the pid.
     """
     import psutil
 
@@ -167,6 +167,7 @@ def test_reused_early_pid_after_reboot_is_not_the_gateway(host_dir):
         )
         assert hr.liveness_is_proven(record) is False
         assert hr.record_is_stale(record) is True
+        assert not hr.lock_path(hr.ROLE_GATEWAY).exists()
         drifted = dataclasses.replace(record, create_time=boot + 1.0)
         assert hr.liveness_is_proven(drifted) is True
         assert hr.record_is_stale(drifted) is False

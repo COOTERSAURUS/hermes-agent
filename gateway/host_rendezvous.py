@@ -265,28 +265,22 @@ def _boot_time() -> Optional[float]:
 def _host_lock_is_free(role: str) -> Optional[bool]:
     """True when no process holds the host lock for ``role``; ``None`` when it cannot be probed.
 
-    The probe takes the lock for an instant, so a gateway claiming it in that instant gets
-    HELD_BY_OTHER and its supervisor retries. Callers only reach this for a legacy record that
-    is already suspect, never on the normal attach path.
+    Read-only callers (status, dashboard) reach this, so it never creates the lock dir or file: a
+    missing lock file means nobody holds the lock. The probe takes the lock for an instant, so a
+    gateway claiming it in that instant gets HELD_BY_OTHER and its supervisor retries.
     """
     if owns_host_lock(role):
         return False
-    from gateway.status import _release_file_lock, _try_acquire_file_lock
+    from gateway.status import _probe_lock_file
 
     try:
-        ensure_host_state_dir()
-        handle = open(lock_path(role), "a+", encoding="utf-8")  # windows-footgun: ok — flock handle, never read
+        fd = os.open(str(lock_path(role)), os.O_RDWR)
+    except FileNotFoundError:
+        return True
     except OSError:
         logger.debug("host %s lock could not be probed", role, exc_info=True)
         return None
-    try:
-        if not _try_acquire_file_lock(handle):
-            return False
-        _release_file_lock(handle)
-        return True
-    finally:
-        with contextlib.suppress(OSError):
-            handle.close()
+    return not _probe_lock_file(os.fdopen(fd, "r+", encoding="utf-8"))
 
 
 def _current_boot_epoch() -> str:
@@ -306,14 +300,14 @@ def _record_incarnation_matches(record: HostRecord) -> Optional[bool]:
     New records prefer the canonical start fingerprint: on Linux/WSL it comes from /proc start
     ticks and is immune to wall-clock shifts that move psutil.create_time(). Those ticks are
     NOT unique across reboots — they reset, and an early-boot PID reused within the drift
-    tolerance looks like the dead owner. A published boot epoch that differs from this boot's, or
-    (for legacy records with no epoch) a create_time from before this boot began while nobody holds
-    the host lock, is a mismatch. Empty epoch is a no-op so macOS and pre-upgrade records are not false-staled. Do not infer
-    identity from argv. A record with neither create_time nor start_time proves nothing about
+    tolerance looks like the dead owner. A published boot epoch that differs from this boot's is a
+    mismatch. A gateway record with no epoch (published before ``bootEpoch`` existed, or on any
+    platform without /proc, where the epoch is always empty) whose create_time predates this boot
+    is a mismatch only while nobody holds the host lock. Do not infer identity from argv. A record with neither create_time nor start_time proves nothing about
     its pid, so it never vouches for one. Legacy records without a start fingerprint keep the
     create-time check.
     """
-    recorded_epoch = getattr(record, "boot_epoch", "") or ""
+    recorded_epoch = record.boot_epoch
     epoch = _current_boot_epoch()
     if recorded_epoch and epoch and recorded_epoch != epoch:
         return False
@@ -333,7 +327,7 @@ def _record_incarnation_matches(record: HostRecord) -> Optional[bool]:
         return matched
     if record.role == ROLE_GATEWAY and not recorded_epoch and record.create_time is not None:
         boot = _boot_time()
-        if boot is not None and float(record.create_time) < boot - _LEGACY_BOOT_SLACK_S:
+        if boot is not None and record.create_time < boot - _LEGACY_BOOT_SLACK_S:
             lock_free = _host_lock_is_free(record.role)
             if lock_free is None:
                 return None
