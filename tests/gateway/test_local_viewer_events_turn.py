@@ -533,6 +533,19 @@ def test_subagent_roster_retains_running_child_after_fallback_evicts_parent():
         assert [r['subagent_id'] for r in _owner_objects(authority_a, ref, include_fallback_evicted=True)[1]] == ['fallback-child']
         assert _owner_objects(authority_a, ref, include_fallback_evicted=False)[1] == []
         assert subagent_records(replacement, include_fallback_evicted=False) == []
+        # A rotating /compress after the fallback moves the conversation to a new stored id; the lineage keeps the child listed, still scoped by DB and route.
+        class _LineageDB:
+            def get_compression_lineage(self, session_id):
+                return ['same-parent', 'same-parent-c1'] if session_id in ('same-parent', 'same-parent-c1') else [session_id]
+        lineage_db = _LineageDB()
+        for agent_obj in (original, wrong_route_parent, replacement):
+            agent_obj._session_db = lineage_db
+        rotated = Parent()
+        rotated.session_id = 'same-parent-c1'
+        rotated._session_db = lineage_db
+        rotated.gateway_session_key = 'route-a'
+        assert [r['subagent_id'] for r in subagent_records(rotated)] == ['fallback-child']
+        assert subagent_records(None, session_id='unrelated', session_db=lineage_db, route='route-a') == []
     finally:
         for sid in ('fallback-child', 'wrong-db-child', 'wrong-route-child', 'stale-child'):
             _unregister_subagent(sid)
