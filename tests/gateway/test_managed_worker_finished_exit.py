@@ -20,7 +20,9 @@ send({'type': 'hello', 'pid': me.pid, 'birth': me.create_time(), 'ancestors': [p
 for line in sys.stdin.buffer:
     frame = json.loads(line)
     if 'version' in frame:
-        send({'type': 'result', 'result': {'final_response': 'FINISHED_ANSWER'}})
+        send({'type': 'result', 'result': {'final_response': 'FINISHED_ANSWER', 'model': 'm', 'failure_reason': 'billing',
+              'billing_block': {'provider': 'custom', 'provider_label': 'Custom', 'model': 'm', 'billing_url': None,
+                                'is_nous': False, 'message': 'Add credits'}}})
     elif frame == {'type': 'finish'}:
         send({'type': 'finished'})
         break
@@ -43,6 +45,8 @@ def test_finished_worker_keeps_its_result_on_slow_or_nonzero_exit(tmp_path, monk
     monkeypatch.setenv('HERMES_HOME', str(tmp_path))
     db = SessionDB(db_path=tmp_path / 'state.db')
     db.create_session('s', source='test')
+    # The worker's per-call usage writes, already committed by the time it reports 'finished'.
+    db.update_token_counts('s', input_tokens=200, output_tokens=50, cache_read_tokens=800, api_call_count=3, model='m')
     runner = SimpleNamespace(_draining=False, _cached_agent_for=lambda route: None,
                              _adapter_for_source=lambda source: None)
     authority = SessionAuthority(runner, profile_id='owned', instance_id='i', db=db,
@@ -70,6 +74,13 @@ def test_finished_worker_keeps_its_result_on_slow_or_nonzero_exit(tmp_path, monk
         row, response = asyncio.run(scenario())
         status = db._read_one('SELECT status FROM session_admissions WHERE admission_id=?', (row['admission_id'],))[0]
     assert response == 'FINISHED_ANSWER'
-    assert authority.pending_results[row['admission_id']]['result']['final_response'] == 'FINISHED_ANSWER'
+    captured = authority.pending_results[row['admission_id']]
+    assert captured['result']['final_response'] == 'FINISHED_ANSWER'
     assert status == 'started', 'the finished turn was marked unknown instead of reaching settlement'
     assert spawned[0].poll() is not None, "close() did not reap the worker"
+    # A local viewer's message.complete gets the billing banner and turn-end usage, as in process.
+    from gateway.session_settlement_recovery import completion_payload
+    complete = completion_payload(row, {'outcome': 'completed'}, response, captured)
+    assert complete['billing']['message'] == 'Add credits' and complete['failure_reason'] == 'billing'
+    assert complete['usage'] == {'model': 'm', 'input': 200, 'output': 50, 'reasoning': 0, 'prompt': 1000,
+                                 'completion': 50, 'total': 1050, 'calls': 3, 'cache_hit_pct': 80}

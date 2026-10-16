@@ -31,9 +31,24 @@ def test_worker_result_frame_carries_the_usage_ledger():
     assert result['estimated_cost_usd'] == 0.0125 and result['turn_exit_reason'].startswith('text_response')
     assert len(result['error']) == 4096 and 'messages' not in result and 'base_url' not in result
     # Unknown or non-scalar fields are refused at the owner boundary.
-    for bad in ({'final_response': 'x', 'messages': []}, {'final_response': 'x', 'model': ['m']}, {'failed': True}):
+    for bad in ({'final_response': 'x', 'messages': []}, {'final_response': 'x', 'model': ['m']}, {'failed': True},
+                {'final_response': 'x', 'billing_block': {'provider': 'p', 'extra': 1}},
+                {'final_response': 'x', 'billing_block': {'message': {'nested': 'no'}}},
+                {'final_response': 'x', 'billing_block': 'not a dict'}):
         try:
             accept_result(bad)
         except ValueError:
             continue
         raise AssertionError(bad)
+
+
+def test_worker_result_frame_carries_the_billing_block():
+    """A billing-blocked managed turn hands the owner the same structured block the in-process turn
+    returns, so a local viewer's message.complete can carry ``billing``."""
+    block = {'provider': 'custom', 'provider_label': 'Custom', 'model': 'm', 'billing_url': None,
+             'is_nous': False, 'message': 'Add credits', 'unverified': True, 'internal': object()}
+    raw = {**_run_conversation_result(), 'failed': True, 'failure_reason': 'billing', 'billing_block': block}
+    wire = read_frame(io.BytesIO(encode_frame({'type': 'result', 'result': result_frame(raw)})))
+    result, _usage = accept_result(wire['result'])
+    assert result['billing_block'] == {k: v for k, v in block.items() if k != 'internal'}
+    assert result['failure_reason'] == 'billing'

@@ -450,6 +450,23 @@ def _interrupted_before_bootstrap(authority, row):
     return ''
 
 
+def _settled_session_usage(authority, session_id, accepted):
+    """A managed turn's ``message.complete.usage``: the worker exits with the turn, so the
+    session-cumulative counters come from the session row its usage writes just committed."""
+    import sqlite3
+    try:
+        row = authority.db.get_session(session_id) or {}
+    except sqlite3.Error:  # usage is display-only; settlement never waits on it
+        return {}
+    counts = {key: int(row.get(key) or 0) for key in (
+        'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'reasoning_tokens')}
+    prompt = counts['input_tokens'] + counts['cache_read_tokens'] + counts['cache_write_tokens']
+    return {'session_usage': {**counts, 'prompt_tokens': prompt, 'completion_tokens': counts['output_tokens'],
+                              'total_tokens': prompt + counts['output_tokens'],
+                              'api_calls': int(row.get('api_call_count') or 0),
+                              'model': str(accepted.get('model') or row.get('model') or '')}}
+
+
 async def execute_managed(authority, ref, row, policy):
     from gateway.run_turn_progress import publish_worker_tool_event
     # This route never passes the inbound prepare step, so the worker would read ``@`` tokens as typed.
@@ -531,7 +548,9 @@ async def execute_managed(authority, ref, row, policy):
                 with suppress(subprocess.TimeoutExpired):
                     await asyncio.to_thread(process.wait, 10)
                 # Like in-process execution, settlement belongs to the drain's stream lock.
-                authority.pending_results[row['admission_id']] = {'result': accepted, 'usage': usage}
+                authority.pending_results[row['admission_id']] = {
+                    'result': {**accepted, 'local_viewer': True}, 'usage': usage,
+                    **await asyncio.to_thread(_settled_session_usage, authority, scope['session_id'], accepted)}
                 return accepted['final_response']
             raise RuntimeStoreError('invalid_worker_frame')
     except (Exception, asyncio.CancelledError) as exc:
