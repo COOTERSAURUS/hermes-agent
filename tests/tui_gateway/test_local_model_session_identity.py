@@ -135,3 +135,38 @@ def test_resume_recovers_a_local_chat_that_recorded_only_its_billing_endpoint(lo
     assert overrides.get("provider_override") == "llamacpp"
     assert restored_model == model
     assert restored["base_url"] == route["base_url"]
+
+
+GLM_OLD, GLM_NEW = "http://10.0.0.5:8000/v1", "http://10.0.0.6:8000/v1"
+
+
+def _billing_only_row(base_url):
+    return {"model": "GLM-5.3", "model_config": {"max_iterations": 60, "api_mode": "chat_completions"},
+            "billing_provider": "custom", "billing_base_url": base_url}
+
+
+def _custom_config(monkeypatch, *entries):
+    config = {"model": {"provider": "anthropic", "default": "claude-opus-5-5"}, "custom_providers": list(entries)}
+    monkeypatch.setattr(rp, "load_config", lambda: config)
+    monkeypatch.setattr(rp, "_get_model_config", lambda: config["model"])
+
+
+def test_resume_follows_a_custom_entry_that_moved_since_the_chat(monkeypatch):
+    _custom_config(monkeypatch, {"name": "glm", "base_url": GLM_NEW, "api_key": "glm-key", "model": "GLM-5.3"})
+
+    overrides = server._stored_session_runtime_overrides(_billing_only_row(GLM_OLD))
+
+    assert overrides["provider_override"] == "custom:glm"
+    assert overrides["model_override"]["base_url"] is None
+
+
+def test_resume_never_sends_the_default_provider_to_an_endpoint_no_entry_serves(monkeypatch):
+    """The stored endpoint belonged to a route that no longer exists. Pinning it on the profile's
+    default provider would send that provider's credentials to it."""
+    _custom_config(monkeypatch)
+
+    overrides = server._stored_session_runtime_overrides(_billing_only_row(GLM_OLD))
+
+    assert "provider_override" not in overrides
+    assert overrides["model_override"]["base_url"] is None
+    assert overrides["model_override"]["api_mode"] is None

@@ -481,6 +481,44 @@ def test_session_gateway_runtime_bare_custom_falls_back_to_billing_base_url():
     assert SessionDB.session_gateway_runtime(meta) == {}
 
 
+GLM_OLD, GLM_NEW = "http://10.0.0.5:8000/v1", "http://10.0.0.6:8000/v1"
+
+
+def _billing_only_meta():
+    meta = _row(model="GLM-5.3", model_config={"api_mode": "chat_completions"})
+    meta["billing_provider"] = "custom"
+    meta["billing_base_url"] = GLM_OLD
+    return meta
+
+
+def _custom_config(monkeypatch, *entries):
+    import hermes_cli.runtime_provider as rp
+    config = {"model": {"provider": "anthropic", "default": "claude-opus-5-5"}, "custom_providers": list(entries)}
+    monkeypatch.setattr(rp, "load_config", lambda: config)
+    monkeypatch.setattr(rp, "_get_model_config", lambda: config["model"])
+
+
+def test_stored_session_route_follows_a_custom_entry_that_moved(monkeypatch):
+    """The entry serving the chat's model now lives at a new URL: resume runs on the entry, which
+    resolves its own endpoint, not on the URL the chat last billed."""
+    from hermes_cli.cli_model_switch_mixin import stored_session_route
+    _custom_config(monkeypatch, {"name": "glm", "base_url": GLM_NEW, "api_key": "glm-key", "model": "GLM-5.3"})
+
+    route = stored_session_route(_billing_only_meta(), current_model="claude-opus-5-5", current_provider="anthropic")
+
+    assert route[:3] == ("GLM-5.3", "custom:glm", None)
+    assert route[4] is True
+
+
+def test_stored_session_route_drops_an_endpoint_no_entry_serves(monkeypatch):
+    from hermes_cli.cli_model_switch_mixin import stored_session_route
+    _custom_config(monkeypatch)
+
+    route = stored_session_route(_billing_only_meta(), current_model="claude-opus-5-5", current_provider="anthropic")
+
+    assert route == ("GLM-5.3", None, None, None, False)
+
+
 def test_session_gateway_runtime_bare_auto_ignores_billing_base_url():
     """auto bills through the router — no attributable endpoint, stays filtered."""
     meta = _row()
