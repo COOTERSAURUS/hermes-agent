@@ -76,11 +76,28 @@ describe('useMessageStream status-bar usage scoping', () => {
       avg_tps: 41.6,
       cache_hit_pct: 80,
       calls: 3,
+      completion: 0,
       input: 1_200,
       output: 80,
+      prompt: 1_000,
+      reasoning: 0,
       total: 1_280
     })
     expect(sessionStates.get(SID)?.usage).toEqual($currentUsage.get())
+  })
+
+  it('maps latency and active subagents from a canonical tick the same way Ink does', () => {
+    mountStream()
+
+    act(() =>
+      stream.handleEvent({
+        payload: { active_subagents: 2, api_calls: 1, avg_latency_s: 0.84, total_tokens: 10 },
+        session_id: SID,
+        type: 'session.usage'
+      })
+    )
+
+    expect($currentUsage.get()).toMatchObject({ active_subagents: 2, avg_latency_s: 0.8, calls: 1, total: 10 })
   })
 
   it('falls back to prompt_tokens and completion_tokens when input_tokens and output_tokens are zero', () => {
@@ -104,8 +121,11 @@ describe('useMessageStream status-bar usage scoping', () => {
     expect($currentUsage.get()).toEqual({
       ...BASELINE,
       calls: 3,
+      completion: 80,
       input: 1_000,
       output: 80,
+      prompt: 1_000,
+      reasoning: 0,
       total: 1_080
     })
   })
