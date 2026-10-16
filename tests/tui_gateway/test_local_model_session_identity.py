@@ -117,3 +117,21 @@ def test_local_identity_never_claims_an_unrelated_endpoint(local_route):
     assert rp.canonical_custom_identity(base_url="http://127.0.0.1:18435/v1") is None
     assert rp.canonical_custom_identity(base_url="https://api.anthropic.com") is None
     assert rp.canonical_custom_identity(model="Local.Model-Q4_K_M") is None
+
+
+def test_resume_recovers_a_local_chat_that_recorded_only_its_billing_endpoint(local_route):
+    """A chat that started on the profile's local default never ran /model, so its row holds only
+    the bare "custom" billing class and the endpoint that served it. Resume routes it back to the
+    managed server instead of pairing the local model with the profile's default provider."""
+    route, _session = local_route
+    model = "Local.Model-Q4_K_M"
+    row = {"model": model, "model_config": {"max_iterations": 60},
+           "billing_provider": "custom", "billing_base_url": route["base_url"]}
+
+    overrides = server._stored_session_runtime_overrides(row)
+    restored_model, restored = server._resolve_agent_model_runtime(
+        overrides["model_override"], overrides.get("provider_override"))
+
+    assert overrides.get("provider_override") == "llamacpp"
+    assert restored_model == model
+    assert restored["base_url"] == route["base_url"]
